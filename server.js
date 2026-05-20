@@ -11,11 +11,17 @@ const { z } = require("zod");
 const app = express();
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || "change-this-secret-before-deploying";
+const isVercel = Boolean(process.env.VERCEL);
+const hasDatabaseUrl = Boolean(process.env.DATABASE_URL);
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false
-});
+const pool = hasDatabaseUrl
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false
+    })
+  : null;
+
+let dbInitPromise;
 
 app.use(cors());
 app.use(express.json());
@@ -137,6 +143,23 @@ async function initDb() {
     );
   `);
 }
+
+async function ensureDbReady(req, res, next) {
+  if (!pool) {
+    return sendError(res, 503, "DATABASE_URL is not configured");
+  }
+
+  try {
+    dbInitPromise ||= initDb();
+    await dbInitPromise;
+    return next();
+  } catch (error) {
+    dbInitPromise = null;
+    return next(error);
+  }
+}
+
+app.use("/api", ensureDbReady);
 
 app.get("/api/health", async (_req, res) => {
   await pool.query("select 1");
@@ -395,11 +418,15 @@ app.use((error, _req, res, _next) => {
   sendError(res, 500, "Something went wrong");
 });
 
-initDb()
-  .then(() => {
-    app.listen(PORT, () => console.log(`Team Task Manager running on port ${PORT}`));
-  })
-  .catch((error) => {
-    console.error("Database startup failed:", error);
-    process.exit(1);
-  });
+if (!isVercel) {
+  initDb()
+    .then(() => {
+      app.listen(PORT, () => console.log(`Team Task Manager running on port ${PORT}`));
+    })
+    .catch((error) => {
+      console.error("Database startup failed:", error);
+      process.exit(1);
+    });
+}
+
+module.exports = app;
